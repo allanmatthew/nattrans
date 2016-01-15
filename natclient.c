@@ -328,7 +328,6 @@ int main(int argc, char *argv[]) {
     /* Start sending pings to both private and public ports.  Look for 
      * responses, and depending on which port (public/private) we see
      * the first response send from then on on that port */
-    bool got_response = false;
     enum {
         PUBLIC,
         PRIVATE
@@ -397,8 +396,8 @@ int main(int argc, char *argv[]) {
                 gettimeofday(&t_now, NULL);
                 struct timeval t_delta;
                 timersub(&t_now, &t_from_peer, &t_delta);
-                double dt = (double)t_delta.tv_sec + ((double)t_delta.tv_usec/1.e6);
-                printf("%s latency: %fs\n", 
+                double dt = (double)t_delta.tv_sec*1.e3 + ((double)t_delta.tv_usec/1.e3);
+                printf("%s latency: %fms\n", 
                         (((packet_t*)buf)->pkt_type == PUBLIC_DATA ? "Public" : "Private"),
                         dt);
             }
