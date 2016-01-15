@@ -29,6 +29,8 @@ typedef struct {
     int n_retry_A;
     int n_retry_B;
 }pair_t;
+    
+int sock_fd; //The socket
 
 /* Get current wall-clock time and return it in microseconds since the Unix
  * epoch.
@@ -61,14 +63,14 @@ uint64_t clock_gettime_us(clockid_t clock_id)
 #endif
 }
 
-int open_port(int *sock_fd, int port) {
+int open_port(int port) {
     struct sockaddr_in myaddr;      /* our address */
     struct timeval timeout;
     timeout.tv_sec = 0;
-    timeout.tv_usec = 50000; //50ms
+    timeout.tv_usec = 100000; //100ms
 
     /* create a UDP socket */
-    if ((*sock_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
+    if ((sock_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
     {
         printf("udp: can't create socket\n");
         return -1;
@@ -85,7 +87,7 @@ int open_port(int *sock_fd, int port) {
 #endif
 
     /* Set a timeout on the recv */
-    setsockopt(*sock_fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
+    setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
 
     /* Bind the socket to any IP. */
     memset((char *)&myaddr, 0, sizeof(myaddr));
@@ -93,9 +95,37 @@ int open_port(int *sock_fd, int port) {
     myaddr.sin_addr.s_addr = htonl(INADDR_ANY);
     myaddr.sin_port = htons(port);
 
-    if (bind(*sock_fd, (struct sockaddr *)&myaddr, sizeof(myaddr)) < 0)
+    if (bind(sock_fd, (struct sockaddr *)&myaddr, sizeof(myaddr)) < 0)
     {
         printf("udp: bind: %s\n", strerror(errno));
+        return -1;
+    }
+
+    return 0;
+}
+
+int send_packet(client_t *client, packet_t *packet) {
+    char buf[sizeof(packet_t)];
+    struct sockaddr_in addr;
+    int bytesSent;
+
+    if(!client || !packet){
+        printf("Error, client or packet bogus\n");
+        return -1;
+    }
+
+    memset(buf, 0, sizeof(buf));
+    memcpy(buf, packet, sizeof(packet_t));
+
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = client->ip_data.public_addr;
+    addr.sin_port = client->ip_data.public_port;
+
+    bytesSent = sendto(sock_fd, buf, sizeof(packet_t), 0, 
+            (struct sockaddr*)&addr, sizeof(struct sockaddr_in));
+
+    if(bytesSent < 0) {
+        printf("Error sending to client %lu\n", client->uid);
         return -1;
     }
 
@@ -118,14 +148,14 @@ int main(int argc, char *argv[]) {
     struct sockaddr_in srcAddr;
     pair_t *pairs[MAX_PAIRS];
     socklen_t slen;
-    int sock_fd;
     int recvlen;
     char buf[1500];
-    int bytesSent;
+    packet_t packet;
     int i;
     client_t *new_client = NULL;
     int send_client_pair_idx = -1;
     uint64_t now;
+    struct in_addr ia;
     int server_port = SOURCEPORT;
 
     memset(buf,0,sizeof(buf));
@@ -139,7 +169,7 @@ int main(int argc, char *argv[]) {
         pairs[i] = NULL;
 
     /* Open the port */
-    if(open_port(&sock_fd, server_port) != 0)
+    if(open_port(server_port) != 0)
         return -1;
    
     /* Start listening for clients.  Once we get two, send their data */ 
@@ -149,12 +179,9 @@ int main(int argc, char *argv[]) {
                            (struct sockaddr*)&srcAddr, &slen);
 
         if(recvlen < 0) {
-            continue;
+            goto check_retry;
         }
 
-        printf("Received %i bytes from %s:%i\n", recvlen, 
-               inet_ntoa(srcAddr.sin_addr), ntohs(srcAddr.sin_port));
-                
         /* Sanity check */
         if(recvlen != sizeof(packet_t)) {
             printf("Received data is the wrong size\n");
@@ -163,15 +190,15 @@ int main(int argc, char *argv[]) {
 
         send_client_pair_idx = -1;
 
+        memcpy(&packet, buf, sizeof(packet_t));
+
         /* Determine the packet type */
-        switch(((packet_t*)buf)->pkt_type) {
+        switch(packet.pkt_type) {
             case REQUEST:
                 /* Is this a new pair id? */
                 for(i=0; i<MAX_PAIRS; ++i) {
                     if(pairs[i] == NULL) {
                         /* This is a new pair ID, create a new pair */
-                        printf("New pair id: %u\n", (unsigned)((packet_t*)buf)->client_data.pair_id);
-
                         /* Make sure we don't have too many already */
                         if(i == MAX_PAIRS-1) {
                             printf("Error: too many pairs\n");
@@ -187,25 +214,25 @@ int main(int argc, char *argv[]) {
                         else {
                             memset(pairs[i], 0, sizeof(pair_t));
                             printf("First client %u for pair %u\n", 
-                                    (unsigned)((packet_t*)buf)->client_data.uid,
-                                    (unsigned)((packet_t*)buf)->client_data.pair_id);
+                                    (unsigned)packet.client_data.uid,
+                                    (unsigned)packet.client_data.pair_id);
 
-                            new_client = &pairs[i]->client_A;
+                            new_client = &(pairs[i]->client_A);
                         }
                         break;
                     }
-                    else if(pairs[i]->client_A.pair_id == ((packet_t*)buf)->client_data.pair_id) {
+                    else if(pairs[i]->client_A.pair_id == packet.client_data.pair_id) {
                         /* This is an existing pair ID */
                         /* Is this a client we already have? */
-                        if(pairs[i]->client_A.uid == ((packet_t*)buf)->client_data.uid) {
+                        if(pairs[i]->client_A.uid == packet.client_data.uid) {
                             printf("Received duplicate request from %u\n", 
-                                    (unsigned)((packet_t*)buf)->client_data.uid);
+                                    (unsigned)packet.client_data.uid);
                             /* Regardless, we ack its info */
                         }
                         else {
                             printf("Second client %u for pair %u\n", 
-                                    (unsigned)((packet_t*)buf)->client_data.uid, 
-                                    (unsigned)((packet_t*)buf)->client_data.pair_id);
+                                    (unsigned)packet.client_data.uid, 
+                                    (unsigned)packet.client_data.pair_id);
                             
                             new_client = &pairs[i]->client_B;
 
@@ -218,22 +245,31 @@ int main(int argc, char *argv[]) {
 
                 if(new_client != NULL) {
                     memcpy(new_client, 
-                           &((packet_t*)buf)->client_data, sizeof(client_t));
-
+                           &packet.client_data, sizeof(client_t));
+                    
                     /* Populate the public ip tuple for this client */
-                    memcpy(&new_client->ip_data.public_ip,
-                            &srcAddr, sizeof(struct sockaddr_in));
+                    new_client->ip_data.public_addr = srcAddr.sin_addr.s_addr;
+                    new_client->ip_data.public_port = srcAddr.sin_port;
+                            
+                    ia.s_addr = new_client->ip_data.private_addr;
+                    printf("New client is at %s:%i",  
+                            inet_ntoa(ia),
+                            ntohs(new_client->ip_data.private_port));
 
+                    ia.s_addr = new_client->ip_data.public_addr;
+                    printf(" / %s:%i\n",
+                            inet_ntoa(ia),
+                            ntohs(new_client->ip_data.public_port));
+                    
                     /* Send the client_t back to the client as an ack */
-                    memset(buf, 0, sizeof(buf));
-                    ((packet_t*)buf)->pkt_type = SERVER_ACK;
-                    memcpy(&((packet_t*)buf)->client_data, 
+                    memset(&packet, 0, sizeof(packet_t));
+                    packet.pkt_type = SERVER_ACK;
+                    memcpy(&packet.client_data, 
                             new_client, sizeof(client_t));
 
-                    bytesSent = sendto(sock_fd, buf, sizeof(packet_t), 0, 
-                            (struct sockaddr *)&srcAddr, sizeof(struct sockaddr_in));
+                    if(!send_packet(new_client, &packet))
+                        printf("Sent a SERVER_ACK to new client\n");
 
-                    printf("Sent a %i byte SERVER_ACK to new client\n", bytesSent);
                     new_client = NULL;
                 }
 
@@ -247,12 +283,12 @@ int main(int argc, char *argv[]) {
                         break;
                     }
 
-                    if(((packet_t*)buf)->client_data.pair_id == pairs[i]->client_A.pair_id) {
-                        if(((packet_t*)buf)->client_data.uid == pairs[i]->client_A.uid) {
+                    if(packet.client_data.pair_id == pairs[i]->client_A.pair_id) {
+                        if(packet.client_data.uid == pairs[i]->client_A.uid) {
                             printf("Got ACK from client A\n");
                             pairs[i]->got_ack_A = 1;
                         }
-                        else if(((packet_t*)buf)->client_data.uid == pairs[i]->client_B.uid) {
+                        else if(packet.client_data.uid == pairs[i]->client_B.uid) {
                             printf("Got ACK from client B\n");
                             pairs[i]->got_ack_B = 1;
                         }
@@ -276,103 +312,84 @@ int main(int argc, char *argv[]) {
             case SERVER_ACK:
             default:
                 printf("Error, got incorrect or unrecognized packet type: %i\n", 
-                        ((packet_t*)buf)->pkt_type);
+                        packet.pkt_type);
                 break;
         }
         
         if(send_client_pair_idx >= 0) {        
             /* If we have both clients, send them each their partner's info */
-            memset(buf, 0, sizeof(buf));
-            ((packet_t*)buf)->pkt_type = CLIENT_INFO;
-            memcpy(&((packet_t*)buf)->client_data, 
+            memset(&packet, 0, sizeof(packet_t));
+            packet.pkt_type = CLIENT_INFO;
+            memcpy(&packet.client_data, 
                    &pairs[send_client_pair_idx]->client_B, sizeof(client_t));
 
-            memcpy(&srcAddr,
-                   &pairs[send_client_pair_idx]->client_A.ip_data.public_ip,
-                   sizeof(struct sockaddr_in));
-
-            bytesSent = sendto(sock_fd, buf, sizeof(packet_t), 0, 
-                    (struct sockaddr *)&srcAddr, sizeof(struct sockaddr_in));
-
-            pairs[i]->last_tx_A = clock_gettime_us(CLOCK_MONOTONIC);
-
-            printf("Sent a %i byte CLIENT_INFO to client A\n", bytesSent);
+            if(!send_packet(&pairs[send_client_pair_idx]->client_A, &packet)){
+                printf("Sent a CLIENT_INFO to client A\n");
+                pairs[i]->last_tx_A = clock_gettime_us(CLOCK_MONOTONIC);
+            }
             
-            memset(buf, 0, sizeof(buf));
-            ((packet_t*)buf)->pkt_type = CLIENT_INFO;
-            memcpy(&((packet_t*)buf)->client_data, 
+            memset(&packet, 0, sizeof(packet_t));
+            packet.pkt_type = CLIENT_INFO;
+            memcpy(&packet.client_data, 
                    &pairs[send_client_pair_idx]->client_A, sizeof(client_t));
-
-            memcpy(&srcAddr,
-                   &pairs[send_client_pair_idx]->client_B.ip_data.public_ip,
-                   sizeof(struct sockaddr_in));
-
-            bytesSent = sendto(sock_fd, buf, sizeof(packet_t), 0, 
-                    (struct sockaddr *)&srcAddr, sizeof(struct sockaddr_in));
             
-            pairs[i]->last_tx_B = clock_gettime_us(CLOCK_MONOTONIC);
-
-            printf("Sent a %i byte CLIENT_INFO to client B\n", bytesSent);
-        }
-    }
-
-    /* See if its been too long since we sent data to a client and have not received
-     * an ack */
-    for(i=0; i<MAX_PAIRS; ++i) {
-        if(pairs[i] == NULL)
-            break;
-
-        now = clock_gettime_us(CLOCK_MONOTONIC);
-        if(!pairs[i]->got_ack_A && 
-           ((now-pairs[i]->last_tx_A) > TX_RETRY_US)) {
-            printf("Retrying transmission to client A\n");
-            ++pairs[i]->n_retry_A;
-
-            memset(buf, 0, sizeof(buf));
-            ((packet_t*)buf)->pkt_type = CLIENT_INFO;
-            memcpy(&((packet_t*)buf)->client_data, 
-                    &pairs[send_client_pair_idx]->client_B, sizeof(client_t));
-
-            memcpy(&srcAddr,
-                    &pairs[send_client_pair_idx]->client_A.ip_data.public_ip,
-                    sizeof(struct sockaddr_in));
-
-            bytesSent = sendto(sock_fd, buf, sizeof(packet_t), 0, 
-                    (struct sockaddr *)&srcAddr, sizeof(struct sockaddr_in));
-
-            pairs[i]->last_tx_A = clock_gettime_us(CLOCK_MONOTONIC);
-
-            printf("Sent a %i byte CLIENT_INFO to client A\n", bytesSent);
-        }
-        
-        now = clock_gettime_us(CLOCK_MONOTONIC);
-        if(!pairs[i]->got_ack_B && 
-           ((now-pairs[i]->last_tx_B) > TX_RETRY_US)) {
-            printf("Retrying transmission to client B\n");
-            ++pairs[i]->n_retry_B;
-
-            memset(buf, 0, sizeof(buf));
-            ((packet_t*)buf)->pkt_type = CLIENT_INFO;
-            memcpy(&((packet_t*)buf)->client_data, 
-                    &pairs[send_client_pair_idx]->client_A, sizeof(client_t));
-
-            memcpy(&srcAddr,
-                    &pairs[send_client_pair_idx]->client_B.ip_data.public_ip,
-                    sizeof(struct sockaddr_in));
-
-            bytesSent = sendto(sock_fd, buf, sizeof(packet_t), 0, 
-                    (struct sockaddr *)&srcAddr, sizeof(struct sockaddr_in));
-
-            pairs[i]->last_tx_A = clock_gettime_us(CLOCK_MONOTONIC);
-
-            printf("Sent a %i byte CLIENT_INFO to client B\n", bytesSent);
+            if(!send_packet(&pairs[send_client_pair_idx]->client_B, &packet)){
+                printf("Sent a CLIENT_INFO to client B\n");
+                pairs[i]->last_tx_B = clock_gettime_us(CLOCK_MONOTONIC);
+            }
         }
 
-        /* If we've retried too many times on either A or B, get rid of this pair */
-        if(pairs[i]->n_retry_A > MAX_RETRIES || pairs[i]->n_retry_B > MAX_RETRIES) {
-            printf("Excessive retries for pair %u\n", (unsigned)pairs[i]->client_A.pair_id);
-            free(pairs[i]);
-            pairs[i] = NULL;
+check_retry:
+        /* See if its been too long since we sent data to a client and have not received
+         * an ack */
+        for(i=0; i<MAX_PAIRS; ++i) {
+            if(pairs[i] == NULL)
+                break;
+
+            now = clock_gettime_us(CLOCK_MONOTONIC);
+            if(pairs[i]->last_tx_A > 0 &&
+               !pairs[i]->got_ack_A && 
+               ((now-pairs[i]->last_tx_A) > TX_RETRY_US)) {
+
+                printf("Retrying transmission to client A\n");
+                ++pairs[i]->n_retry_A;
+                memset(&packet, 0, sizeof(packet_t));
+                packet.pkt_type = CLIENT_INFO;
+                memcpy(&packet.client_data, 
+                        &pairs[i]->client_B, sizeof(client_t));
+                
+                if(!send_packet(&pairs[i]->client_A, &packet)){
+                    printf("Sent a CLIENT_INFO to client A\n");
+                    pairs[i]->last_tx_A = clock_gettime_us(CLOCK_MONOTONIC);
+                }
+
+            }
+            
+            now = clock_gettime_us(CLOCK_MONOTONIC);
+            if(pairs[i]->last_tx_B > 0 &&
+               !pairs[i]->got_ack_B && 
+               ((now-pairs[i]->last_tx_B) > TX_RETRY_US)) {
+                printf("Retrying transmission to client B\n");
+                ++pairs[i]->n_retry_B;
+
+                memset(&packet, 0, sizeof(packet_t));
+                packet.pkt_type = CLIENT_INFO;
+                memcpy(&packet.client_data, 
+                        &pairs[i]->client_A, sizeof(client_t));
+                
+                if(!send_packet(&pairs[i]->client_B, &packet)){
+                    printf("Sent a CLIENT_INFO to client B\n");
+                    pairs[i]->last_tx_A = clock_gettime_us(CLOCK_MONOTONIC);
+                }
+
+            }
+
+            /* If we've retried too many times on either A or B, get rid of this pair */
+            if(pairs[i]->n_retry_A > MAX_RETRIES || pairs[i]->n_retry_B > MAX_RETRIES) {
+                printf("Excessive retries for pair %u\n", (unsigned)pairs[i]->client_A.pair_id);
+                free(pairs[i]);
+                pairs[i] = NULL;
+            }
         }
     }
 

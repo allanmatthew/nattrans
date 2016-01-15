@@ -69,7 +69,7 @@ int open_port(int *sock_fd, int port) {
 	struct sockaddr_in myaddr;
     struct timeval timeout;
     timeout.tv_sec = 0;
-    timeout.tv_usec = 50000;
+    timeout.tv_usec = 10000;
 
 	/* create a UDP socket */
 	if ((*sock_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
@@ -122,6 +122,7 @@ int main(int argc, char *argv[]) {
     int n_retry;
     bool first_client = true;
     int i;
+    struct in_addr ia;
 
     char server_addr[64];
     char if_name[64];
@@ -174,9 +175,8 @@ int main(int argc, char *argv[]) {
         printf("Error: could not get IP of device %s\n", if_name);
         return -1;
     }
-    me.ip_data.private_ip.sin_addr = ((struct sockaddr_in*)&ifr.ifr_addr)->sin_addr;
-    me.ip_data.private_ip.sin_port = htons(SOURCEPORT);
-    me.ip_data.private_ip.sin_family = AF_INET;
+    me.ip_data.private_addr = ((struct sockaddr_in*)&ifr.ifr_addr)->sin_addr.s_addr;
+    me.ip_data.private_port = htons(SOURCEPORT);
 
     /* Set the pair and UID values */
     me.pair_id = pair_id;
@@ -192,10 +192,12 @@ int main(int argc, char *argv[]) {
 	bytesSent = sendto(sock_fd, buf, sizeof(packet_t), 0, 
             (struct sockaddr *)&sock, sizeof(sock));
 
-    last_tx_t = clock_gettime_us(CLOCK_MONOTONIC); 
+    if(bytesSent < 0) {
+        printf("Error: could not send REQUEST packet\n");
+        return -1;
+    }
 
-	printf("Sent %i bytes to %s:%i\n", bytesSent, 
-            inet_ntoa(sock.sin_addr), ntohs(sock.sin_port));
+    last_tx_t = clock_gettime_us(CLOCK_MONOTONIC); 
 
 	/* Wait for data back from the server */
 	memset(buf, 0, sizeof(buf));
@@ -221,17 +223,17 @@ int main(int argc, char *argv[]) {
 
                 bytesSent = sendto(sock_fd, buf, sizeof(packet_t), 0, 
                         (struct sockaddr *)&sock, sizeof(sock));
+    
+                if(bytesSent < 0) {
+                    printf("Error: could not send REQUEST packet\n");
+                    return -1;
+                }
 
                 last_tx_t = clock_gettime_us(CLOCK_MONOTONIC); 
 
-                printf("Sent %i bytes to %s:%i\n", bytesSent, 
-                        inet_ntoa(sock.sin_addr), ntohs(sock.sin_port));
             }
             continue;
         }
-
-        printf("Received %i bytes from %s:%i\n", recvlen, 
-                inet_ntoa(sock.sin_addr), ntohs(sock.sin_port));
 
         if(recvlen != sizeof(packet_t)) {
             printf("Got the wrong packet length\n");
@@ -246,11 +248,15 @@ int main(int argc, char *argv[]) {
 
         /* Overwrite our current me */
         memcpy(&me, &((packet_t*)buf)->client_data, sizeof(client_t));
-        printf("Apparently public/private IP is: %s:%i / %s:%i\n",
-                inet_ntoa(me.ip_data.public_ip.sin_addr),
-                ntohs(me.ip_data.public_ip.sin_port),
-                inet_ntoa(me.ip_data.private_ip.sin_addr),
-                ntohs(me.ip_data.private_ip.sin_port));
+        ia.s_addr = me.ip_data.public_addr;
+        printf("My info: {%s:%i},",
+                inet_ntoa(ia),
+                ntohs(me.ip_data.public_port));
+        
+        ia.s_addr = me.ip_data.private_addr;
+        printf("{%s:%i}\n",
+                inet_ntoa(ia),
+                ntohs(me.ip_data.private_port));
 
         break;
 
@@ -280,43 +286,78 @@ int main(int argc, char *argv[]) {
 
         /* Set our partner data */
         memcpy(&partner, &((packet_t*)buf)->client_data, sizeof(client_t));
-        printf("My partner exists at:  %s:%i / %s:%i \n",
-                inet_ntoa(partner.ip_data.public_ip.sin_addr),
-                ntohs(partner.ip_data.public_ip.sin_port),
-                inet_ntoa(partner.ip_data.private_ip.sin_addr),
-                ntohs(partner.ip_data.private_ip.sin_port));
+        ia.s_addr = partner.ip_data.public_addr;
+        printf("My partner exists at:  %s:%i ",
+                inet_ntoa(ia),
+                ntohs(partner.ip_data.public_port));
+        ia.s_addr = partner.ip_data.private_addr;
+
+        printf("/ %s:%i \n",
+                inet_ntoa(ia),
+                ntohs(partner.ip_data.private_port));
 
         /* Send the server a CLIENT_ACK */
         memset(buf,0,sizeof(buf));
         ((packet_t*)buf)->pkt_type = CLIENT_ACK;
         memcpy(&((packet_t*)buf)->client_data, &me, sizeof(client_t));
+        printf("Sending CLIENT_ACK\n");
         bytesSent = sendto(sock_fd, buf, sizeof(packet_t), 0, 
                 (struct sockaddr *)&sock, sizeof(sock));
-        printf("Sent %i bytes to %s:%i\n", bytesSent, 
-                inet_ntoa(sock.sin_addr), ntohs(sock.sin_port));
+
+        if(bytesSent < 0) {
+            printf("Error: could not send CLIENT_ACK\n");
+            return -1;
+        }
+
         break;
     }
 
     /* We might get another CLIENT_INFO if the server didn't get our ACK;
      * we ignore it and let the server timeout. Otherwise we try to send 
      * data to the other client */
-        
-    if(first_client) {
-        /* Send a timestamp to the other client */
-        printf("Sending first timestamp to partner\n");
+
+    /* Set up the partner sockaddr_in */
+    struct sockaddr_in sock_partner;
+#define N_SENDS 10
+
+    sleep(1);
+    /* Send a timestamp to the other client */
+    printf("Sending timestamp to partner's public IP\n");
+    sock_partner.sin_family = AF_INET;
+    sock_partner.sin_port = partner.ip_data.public_port;
+    sock_partner.sin_addr.s_addr = partner.ip_data.public_addr;
+    for(i=0; i<N_SENDS; ++i) {
         memset(buf, 0, sizeof(buf));
         gettimeofday(&t_now, NULL);
-        ((packet_t*)buf)->pkt_type = DATA;
+        ((packet_t*)buf)->pkt_type = PUBLIC_DATA;
         memcpy((void*)&((packet_t*)buf)->client_data, &t_now, sizeof(struct timeval));
         bytesSent = sendto(sock_fd, buf, sizeof(struct timeval), 0, 
-                (struct sockaddr *)&partner.ip_data.public_ip, sizeof(partner.ip_data.public_ip));
-        printf("Sent %i bytes to %s:%i\n", bytesSent, 
-                inet_ntoa(partner.ip_data.public_ip.sin_addr), 
-                ntohs(partner.ip_data.public_ip.sin_port));
+                (struct sockaddr *)&sock_partner, sizeof(sock_partner));
+        if(bytesSent < 0) {
+            printf("Error: could not send timestamp to partner\n");
+            return -1;
+        }
     }
 
-    while(1) {
+    printf("Sending timestamp to partner's private IP\n");
+    sock_partner.sin_family = AF_INET;
+    sock_partner.sin_port = partner.ip_data.private_port;
+    sock_partner.sin_addr.s_addr = partner.ip_data.private_addr;
+    for(i=0; i<N_SENDS; ++i) {
+        memset(buf, 0, sizeof(buf));
+        gettimeofday(&t_now, NULL);
+        ((packet_t*)buf)->pkt_type = PRIVATE_DATA;
+        memcpy((void*)&((packet_t*)buf)->client_data, &t_now, sizeof(struct timeval));
+        bytesSent = sendto(sock_fd, buf, sizeof(struct timeval), 0, 
+                (struct sockaddr *)&sock_partner, sizeof(sock_partner));
+        if(bytesSent < 0) {
+            printf("Error: could not send timestamp to partner\n");
+            return -1;
+        }
+    }
 
+    printf("Expecting data from partner...\n");
+    while(1) {
         /* Wait for data back from the other client */
         memset(buf, 0, sizeof(buf));
         recvlen = recvfrom(sock_fd, buf, sizeof(buf), 0, 
@@ -326,36 +367,23 @@ int main(int argc, char *argv[]) {
             continue;
 
         /* Make sure to tell the server we got the data */
-        if(((packet_t*)buf)->pkt_type != DATA) {
-            printf("Unrecognized data\n");
+        if(((packet_t*)buf)->pkt_type != PUBLIC_DATA &&
+                ((packet_t*)buf)->pkt_type != PRIVATE_DATA) {
+            printf("Unrecognized data from %s:%i type %i\n",
+                    inet_ntoa(sock.sin_addr),
+                    ntohs(sock.sin_port),
+                    ((packet_t*)buf)->pkt_type);
             continue;
         }
-
-        printf("Received %i bytes from %s:%i\n", recvlen, 
-                inet_ntoa(sock.sin_addr), ntohs(sock.sin_port));
 
         memcpy(&t_from_peer, (void*)&((packet_t*)buf)->client_data, sizeof(struct timeval));
         gettimeofday(&t_now, NULL);
         struct timeval t_delta;
         timersub(&t_now, &t_from_peer, &t_delta);
-        printf("Packet latency: %fms\n", (float)t_delta.tv_usec/1.e3);
-
-        if(first_client)
-            sleep(1);
-        
-        /* Send a timestamp to the other client */
-        printf("Sending new timestamp to partner\n");
-        memset(buf, 0, sizeof(buf));
-        gettimeofday(&t_now, NULL);
-        ((packet_t*)buf)->pkt_type = DATA;
-        memcpy((void*)&((packet_t*)buf)->client_data, &t_now, sizeof(struct timeval));
-        bytesSent = sendto(sock_fd, buf, sizeof(struct timeval), 0, 
-                (struct sockaddr *)&partner.ip_data.public_ip, sizeof(partner.ip_data.public_ip));
-        printf("Sent %i bytes to %s:%i\n", bytesSent, 
-                inet_ntoa(partner.ip_data.public_ip.sin_addr), 
-                ntohs(partner.ip_data.public_ip.sin_port));
-
-        //and continue ping-ponging.
+        double dt = (double)t_delta.tv_sec + ((double)t_delta.tv_usec/1.e6);
+        printf("%s latency: %fs\n", 
+                (((packet_t*)buf)->pkt_type == PUBLIC_DATA ? "Public" : "Private"),
+                dt);
     }
 
 	close(sock_fd);
