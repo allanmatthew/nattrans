@@ -391,14 +391,17 @@ int main(int argc, char *argv[]) {
                 first_response_port==PUBLIC?"public":"private");
 
         for(i=0; i<10; ++i) {
-            memcpy(&t_from_peer, (void*)&((packet_t*)buf)->client_data, sizeof(struct timeval));
-            gettimeofday(&t_now, NULL);
-            struct timeval t_delta;
-            timersub(&t_now, &t_from_peer, &t_delta);
-            double dt = (double)t_delta.tv_sec + ((double)t_delta.tv_usec/1.e6);
-            printf("%s latency: %fs\n", 
-                    (((packet_t*)buf)->pkt_type == PUBLIC_DATA ? "Public" : "Private"),
-                    dt);
+            //Discard the first measurement
+            if(i>0) {
+                memcpy(&t_from_peer, (void*)&((packet_t*)buf)->client_data, sizeof(struct timeval));
+                gettimeofday(&t_now, NULL);
+                struct timeval t_delta;
+                timersub(&t_now, &t_from_peer, &t_delta);
+                double dt = (double)t_delta.tv_sec + ((double)t_delta.tv_usec/1.e6);
+                printf("%s latency: %fs\n", 
+                        (((packet_t*)buf)->pkt_type == PUBLIC_DATA ? "Public" : "Private"),
+                        dt);
+            }
 
             sock_partner.sin_family = AF_INET;
             sock_partner.sin_port = first_response_port==PUBLIC?
