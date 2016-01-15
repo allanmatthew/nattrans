@@ -46,6 +46,10 @@ typedef int clockid_t;
   } while (0)
 #endif
 
+int sock_fd;
+client_t me;
+client_t partner;
+
 /* Get current wall-clock time and return it in microseconds since the Unix
  * epoch.
  *
@@ -77,15 +81,14 @@ uint64_t clock_gettime_us(clockid_t clock_id)
 #endif
 }
 
-
-int open_port(int *sock_fd, int port) {
+int open_port(int port) {
 	struct sockaddr_in myaddr;
     struct timeval timeout;
     timeout.tv_sec = 0;
     timeout.tv_usec = 10000;
 
 	/* create a UDP socket */
-	if ((*sock_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
+	if ((sock_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
 	{
 		printf("udp: can't create socket\n");
 		return -1;
@@ -101,7 +104,7 @@ int open_port(int *sock_fd, int port) {
         }
 #endif
 
-    setsockopt(*sock_fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
+    setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
 
 	/* Bind the socket to any IP, but we'll check the source later */
     memset((char *)&myaddr, 0, sizeof(myaddr));
@@ -109,7 +112,7 @@ int open_port(int *sock_fd, int port) {
     myaddr.sin_addr.s_addr = htonl(INADDR_ANY);
     myaddr.sin_port = htons(port);
 
-    if (bind(*sock_fd, (struct sockaddr *)&myaddr, sizeof(myaddr)) < 0)
+    if (bind(sock_fd, (struct sockaddr *)&myaddr, sizeof(myaddr)) < 0)
     {
         printf("udp: bind: %s\n", strerror(errno));
         return -1;
@@ -118,18 +121,50 @@ int open_port(int *sock_fd, int port) {
     return 0;
 }
 
+int send_ping(uint8_t type) {
+    struct sockaddr_in sock_partner;
+    char buf[1500];
+    char *buf_ptr = buf;
+    uint64_t t_now;
+
+    sock_partner.sin_family = AF_INET;
+    if(type == PUBLIC_DATA) {
+        sock_partner.sin_port = partner.ip_data.public_port;
+        sock_partner.sin_addr.s_addr = partner.ip_data.public_addr;
+    }
+    else {
+        sock_partner.sin_port = partner.ip_data.private_port;
+        sock_partner.sin_addr.s_addr = partner.ip_data.private_addr;
+    }
+
+    memset(buf, 0, sizeof(buf));
+    t_now = clock_gettime_us(CLOCK_MONOTONIC);
+
+    ((packet_t*)buf)->pkt_type = type;
+    buf_ptr = (char*)&((packet_t*)buf)->client_data;
+
+    memcpy(buf_ptr, &me.uid, sizeof(uint64_t));
+    buf_ptr += sizeof(uint64_t);
+    memcpy(buf_ptr, &t_now, sizeof(uint64_t));
+
+    if(sendto(sock_fd, buf, sizeof(uint8_t)+2*sizeof(uint64_t), 0, 
+              (struct sockaddr *)&sock_partner, sizeof(sock_partner)) < 0) {
+        printf("Error: could not send ping to partner\n");
+        return -1;
+    }
+
+    return 0;
+}
 
 int main(int argc, char *argv[]) {
-    client_t me;
-    client_t partner;
-	int sock_fd;
+
     struct sockaddr_in sock;
 	int bytesSent;
 	char buf[1500];
 	int recvlen;
 	socklen_t slen;
-	struct timeval t_now;
-	struct timeval t_from_peer;
+	uint64_t t_now;
+	uint64_t t_from_peer;
     uint64_t pair_id = PAIR_ID;
     uint64_t last_tx_t;
     int n_retry;
@@ -163,7 +198,7 @@ int main(int argc, char *argv[]) {
     printf("Attempting to communicate with server %s:%i on interface %s\n",
             server_addr, server_port, if_name);
 
-    if(open_port(&sock_fd, SOURCEPORT) != 0)
+    if(open_port(SOURCEPORT) != 0)
         return -1;
 	
     memset((char *)&sock, 0, sizeof(sock));
@@ -322,58 +357,26 @@ int main(int argc, char *argv[]) {
      * we ignore it and let the server timeout. Otherwise we try to send 
      * data to the other client */
 
-    /* Set up the partner sockaddr_in */
-    struct sockaddr_in sock_partner;
-
     /* Start sending pings to both private and public ports.  Look for 
      * responses, and depending on which port (public/private) we see
      * the first response send from then on on that port */
-    enum {
-        PUBLIC,
-        PRIVATE
-    }first_response_port = PUBLIC;
-
-    printf("Sending timestamp partner's private and public IPs\n");
-    sock_partner.sin_family = AF_INET;
-    sock_partner.sin_port = partner.ip_data.public_port;
-    sock_partner.sin_addr.s_addr = partner.ip_data.public_addr;
-    memset(buf, 0, sizeof(buf));
-    gettimeofday(&t_now, NULL);
-    ((packet_t*)buf)->pkt_type = PUBLIC_DATA;
-    memcpy((void*)&((packet_t*)buf)->client_data, &t_now, sizeof(struct timeval));
-    bytesSent = sendto(sock_fd, buf, sizeof(struct timeval), 0, 
-            (struct sockaddr *)&sock_partner, sizeof(sock_partner));
-    if(bytesSent < 0) {
-        printf("Error: could not send timestamp to partner\n");
-        return -1;
-    }
-
-    sock_partner.sin_family = AF_INET;
-    sock_partner.sin_port = partner.ip_data.private_port;
-    sock_partner.sin_addr.s_addr = partner.ip_data.private_addr;
-    memset(buf, 0, sizeof(buf));
-    gettimeofday(&t_now, NULL);
-    ((packet_t*)buf)->pkt_type = PRIVATE_DATA;
-    memcpy((void*)&((packet_t*)buf)->client_data, &t_now, sizeof(struct timeval));
-    bytesSent = sendto(sock_fd, buf, sizeof(struct timeval), 0, 
-            (struct sockaddr *)&sock_partner, sizeof(sock_partner));
-    if(bytesSent < 0) {
-        printf("Error: could not send timestamp to partner\n");
-        return -1;
-    }
-
+    printf("Sending pings to partner's private and public IPs\n");
     while(true) {
         /* Wait for data back from the other client */
         memset(buf, 0, sizeof(buf));
         recvlen = recvfrom(sock_fd, buf, sizeof(buf), 0, 
                 (struct sockaddr*)&sock, &slen);
 
-        if(recvlen < 0)
+        if(recvlen < 0){
+            //Keep pinging
+            send_ping(PUBLIC_DATA);
+            send_ping(PRIVATE_DATA);
             continue;
+        }
 
-        /* Make sure to tell the server we got the data */
+        /* Ignore unknown data types */
         if(((packet_t*)buf)->pkt_type != PUBLIC_DATA &&
-                ((packet_t*)buf)->pkt_type != PRIVATE_DATA) {
+           ((packet_t*)buf)->pkt_type != PRIVATE_DATA) {
             printf("Unrecognized data from %s:%i type %i\n",
                     inet_ntoa(sock.sin_addr),
                     ntohs(sock.sin_port),
@@ -381,44 +384,29 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        if(((packet_t*)buf)->pkt_type == PUBLIC_DATA)
-            first_response_port = PUBLIC;
-        else
-            first_response_port = PRIVATE;
-
-        printf("First response was from the %s IP\n", 
-                first_response_port==PUBLIC?"public":"private");
-
-        for(i=0; i<10; ++i) {
-            //Discard the first measurement
-            if(i>0) {
-                memcpy(&t_from_peer, (void*)&((packet_t*)buf)->client_data, sizeof(struct timeval));
-                gettimeofday(&t_now, NULL);
-                struct timeval t_delta;
-                timersub(&t_now, &t_from_peer, &t_delta);
-                double dt = (double)t_delta.tv_sec*1.e3 + ((double)t_delta.tv_usec/1.e3);
-                printf("%s latency: %fms\n", 
-                        (((packet_t*)buf)->pkt_type == PUBLIC_DATA ? "Public" : "Private"),
-                        dt);
-            }
-
-            sock_partner.sin_family = AF_INET;
-            sock_partner.sin_port = first_response_port==PUBLIC?
-                partner.ip_data.public_port:partner.ip_data.private_port;
-            sock_partner.sin_addr.s_addr = first_response_port==PUBLIC?
-                partner.ip_data.public_addr:partner.ip_data.private_addr;
-            memset(buf, 0, sizeof(buf));
-            gettimeofday(&t_now, NULL);
-            ((packet_t*)buf)->pkt_type = first_response_port==PUBLIC?PUBLIC_DATA:PRIVATE_DATA;
-            memcpy((void*)&((packet_t*)buf)->client_data, &t_now, sizeof(struct timeval));
-            bytesSent = sendto(sock_fd, buf, sizeof(struct timeval), 0, 
-                    (struct sockaddr *)&sock_partner, sizeof(sock_partner));
-            if(bytesSent < 0) {
-                printf("Error: could not send timestamp to partner\n");
+        /* If this packet is our uid, its a ping we originally sent,
+         * print out the time it took */
+        uint64_t this_uid;
+        double delta;
+        char *buf_ptr = (char*)&((packet_t*)buf)->client_data;
+        memcpy(&this_uid, buf_ptr, sizeof(uint64_t));
+        if(this_uid == me.uid) {
+            buf_ptr += sizeof(uint64_t);
+            memcpy(&t_from_peer, buf_ptr, sizeof(uint64_t));
+            t_now = clock_gettime_us(CLOCK_MONOTONIC);
+            delta = (double)(t_now - t_from_peer)/1.e3;
+            printf("Ping response on %s port: %fms\n",
+                    (((packet_t*)buf)->pkt_type == PUBLIC_DATA ? "public" : "private"),
+                    delta);
+        }
+        else {
+            //Send it right back
+            if(sendto(sock_fd, buf, recvlen, 0, 
+               (struct sockaddr*)&sock, sizeof(sock)) < 0) {
+                printf("Error: could not reply ping\n");
                 return -1;
             }
         }
-        break;
     }
 
 	close(sock_fd);
