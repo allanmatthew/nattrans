@@ -12,9 +12,20 @@
 #include <netinet/in.h>
 #include <net/if.h>
 #include <stdbool.h>
+#if (defined __MACH__ && defined __APPLE__)
+#include <mach/mach_time.h>
+#include <sys/time.h>
+#else
 #include <sys/time.h>
 #include <time.h>
+#endif
 #include "natserver.h"
+
+#if (defined __MACH__ && defined __APPLE__)
+typedef int clockid_t;
+#define CLOCK_REALTIME  0
+#define CLOCK_MONOTONIC 1
+#endif
 
 #define SOURCEPORT 9000
 #define PAIR_ID 12345
@@ -23,6 +34,7 @@
 #define ACK_TIMEOUT_US 100000
 #define MAX_RETRIES 5
 
+#if (! defined __MACH__ || ! defined __APPLE__)
 # define timersub(a, b, result)                                               \
   do {                                                                        \
     (result)->tv_sec = (a)->tv_sec - (b)->tv_sec;                             \
@@ -32,6 +44,7 @@
       (result)->tv_usec += 1000000;                                           \
     }                                                                         \
   } while (0)
+#endif
 
 /* Get current wall-clock time and return it in microseconds since the Unix
  * epoch.
@@ -280,12 +293,12 @@ int main(int argc, char *argv[]) {
         /* Set our partner data */
         memcpy(&partner, &((packet_t*)buf)->client_data, sizeof(client_t));
         ia.s_addr = partner.ip_data.public_addr;
-        printf("My partner exists at:  %s:%i ",
+        printf("Partner's info:  {%s:%i},",
                 inet_ntoa(ia),
                 ntohs(partner.ip_data.public_port));
         ia.s_addr = partner.ip_data.private_addr;
 
-        printf("/ %s:%i \n",
+        printf("{%s:%i}\n",
                 inet_ntoa(ia),
                 ntohs(partner.ip_data.private_port));
 
@@ -321,7 +334,7 @@ int main(int argc, char *argv[]) {
         PRIVATE
     }first_response_port = PUBLIC;
 
-    printf("Sending timestamp to partner's public IP\n");
+    printf("Sending timestamp partner's private and public IPs\n");
     sock_partner.sin_family = AF_INET;
     sock_partner.sin_port = partner.ip_data.public_port;
     sock_partner.sin_addr.s_addr = partner.ip_data.public_addr;
@@ -336,7 +349,6 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    printf("Sending timestamp to partner's private IP\n");
     sock_partner.sin_family = AF_INET;
     sock_partner.sin_port = partner.ip_data.private_port;
     sock_partner.sin_addr.s_addr = partner.ip_data.private_addr;
@@ -375,7 +387,8 @@ int main(int argc, char *argv[]) {
         else
             first_response_port = PRIVATE;
 
-        printf("First response was from the %s IP\n", first_response_port==PUBLIC?"public":"private");
+        printf("First response was from the %s IP\n", 
+                first_response_port==PUBLIC?"public":"private");
 
         for(i=0; i<10; ++i) {
             memcpy(&t_from_peer, (void*)&((packet_t*)buf)->client_data, sizeof(struct timeval));
@@ -387,11 +400,11 @@ int main(int argc, char *argv[]) {
                     (((packet_t*)buf)->pkt_type == PUBLIC_DATA ? "Public" : "Private"),
                     dt);
 
-            printf("Sending timestamp to partner's %s IP\n",
-                    (first_response_port==PUBLIC?"public":"private"));
             sock_partner.sin_family = AF_INET;
-            sock_partner.sin_port = first_response_port==PUBLIC?partner.ip_data.public_port:partner.ip_data.private_port;
-            sock_partner.sin_addr.s_addr =first_response_port==PUBLIC? partner.ip_data.public_addr:partner.ip_data.private_addr;
+            sock_partner.sin_port = first_response_port==PUBLIC?
+                partner.ip_data.public_port:partner.ip_data.private_port;
+            sock_partner.sin_addr.s_addr = first_response_port==PUBLIC?
+                partner.ip_data.public_addr:partner.ip_data.private_addr;
             memset(buf, 0, sizeof(buf));
             gettimeofday(&t_now, NULL);
             ((packet_t*)buf)->pkt_type = first_response_port==PUBLIC?PUBLIC_DATA:PRIVATE_DATA;
