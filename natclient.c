@@ -120,7 +120,6 @@ int main(int argc, char *argv[]) {
     uint64_t pair_id = PAIR_ID;
     uint64_t last_tx_t;
     int n_retry;
-    bool first_client = true;
     int i;
     struct in_addr ia;
 
@@ -146,16 +145,10 @@ int main(int argc, char *argv[]) {
         else if(!strcmp(argv[i], "-p")) {
             server_port = atoi(argv[i+1]);
         }
-        else if(!strcmp(argv[i], "-A")) {
-            first_client = true;
-        }
-        else if(!strcmp(argv[i], "-B")) {
-            first_client = false;
-        }
     }
 
-    printf("Attempting to communicate with server %s:%i as client %s on interface %s\n",
-            server_addr, server_port, (first_client ? "A" : "B"), if_name);
+    printf("Attempting to communicate with server %s:%i on interface %s\n",
+            server_addr, server_port, if_name);
 
     if(open_port(&sock_fd, SOURCEPORT) != 0)
         return -1;
@@ -318,46 +311,47 @@ int main(int argc, char *argv[]) {
 
     /* Set up the partner sockaddr_in */
     struct sockaddr_in sock_partner;
-#define N_SENDS 10
 
-    sleep(1);
-    /* Send a timestamp to the other client */
+    /* Start sending pings to both private and public ports.  Look for 
+     * responses, and depending on which port (public/private) we see
+     * the first response send from then on on that port */
+    bool got_response = false;
+    enum {
+        PUBLIC,
+        PRIVATE
+    }first_response_port = PUBLIC;
+
     printf("Sending timestamp to partner's public IP\n");
     sock_partner.sin_family = AF_INET;
     sock_partner.sin_port = partner.ip_data.public_port;
     sock_partner.sin_addr.s_addr = partner.ip_data.public_addr;
-    for(i=0; i<N_SENDS; ++i) {
-        memset(buf, 0, sizeof(buf));
-        gettimeofday(&t_now, NULL);
-        ((packet_t*)buf)->pkt_type = PUBLIC_DATA;
-        memcpy((void*)&((packet_t*)buf)->client_data, &t_now, sizeof(struct timeval));
-        bytesSent = sendto(sock_fd, buf, sizeof(struct timeval), 0, 
-                (struct sockaddr *)&sock_partner, sizeof(sock_partner));
-        if(bytesSent < 0) {
-            printf("Error: could not send timestamp to partner\n");
-            return -1;
-        }
+    memset(buf, 0, sizeof(buf));
+    gettimeofday(&t_now, NULL);
+    ((packet_t*)buf)->pkt_type = PUBLIC_DATA;
+    memcpy((void*)&((packet_t*)buf)->client_data, &t_now, sizeof(struct timeval));
+    bytesSent = sendto(sock_fd, buf, sizeof(struct timeval), 0, 
+            (struct sockaddr *)&sock_partner, sizeof(sock_partner));
+    if(bytesSent < 0) {
+        printf("Error: could not send timestamp to partner\n");
+        return -1;
     }
 
     printf("Sending timestamp to partner's private IP\n");
     sock_partner.sin_family = AF_INET;
     sock_partner.sin_port = partner.ip_data.private_port;
     sock_partner.sin_addr.s_addr = partner.ip_data.private_addr;
-    for(i=0; i<N_SENDS; ++i) {
-        memset(buf, 0, sizeof(buf));
-        gettimeofday(&t_now, NULL);
-        ((packet_t*)buf)->pkt_type = PRIVATE_DATA;
-        memcpy((void*)&((packet_t*)buf)->client_data, &t_now, sizeof(struct timeval));
-        bytesSent = sendto(sock_fd, buf, sizeof(struct timeval), 0, 
-                (struct sockaddr *)&sock_partner, sizeof(sock_partner));
-        if(bytesSent < 0) {
-            printf("Error: could not send timestamp to partner\n");
-            return -1;
-        }
+    memset(buf, 0, sizeof(buf));
+    gettimeofday(&t_now, NULL);
+    ((packet_t*)buf)->pkt_type = PRIVATE_DATA;
+    memcpy((void*)&((packet_t*)buf)->client_data, &t_now, sizeof(struct timeval));
+    bytesSent = sendto(sock_fd, buf, sizeof(struct timeval), 0, 
+            (struct sockaddr *)&sock_partner, sizeof(sock_partner));
+    if(bytesSent < 0) {
+        printf("Error: could not send timestamp to partner\n");
+        return -1;
     }
 
-    printf("Expecting data from partner...\n");
-    while(1) {
+    while(true) {
         /* Wait for data back from the other client */
         memset(buf, 0, sizeof(buf));
         recvlen = recvfrom(sock_fd, buf, sizeof(buf), 0, 
@@ -376,14 +370,40 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        memcpy(&t_from_peer, (void*)&((packet_t*)buf)->client_data, sizeof(struct timeval));
-        gettimeofday(&t_now, NULL);
-        struct timeval t_delta;
-        timersub(&t_now, &t_from_peer, &t_delta);
-        double dt = (double)t_delta.tv_sec + ((double)t_delta.tv_usec/1.e6);
-        printf("%s latency: %fs\n", 
-                (((packet_t*)buf)->pkt_type == PUBLIC_DATA ? "Public" : "Private"),
-                dt);
+        if(((packet_t*)buf)->pkt_type == PUBLIC_DATA)
+            first_response_port = PUBLIC;
+        else
+            first_response_port = PRIVATE;
+
+        printf("First response was from the %s IP\n", first_response_port==PUBLIC?"public":"private");
+
+        for(i=0; i<10; ++i) {
+            memcpy(&t_from_peer, (void*)&((packet_t*)buf)->client_data, sizeof(struct timeval));
+            gettimeofday(&t_now, NULL);
+            struct timeval t_delta;
+            timersub(&t_now, &t_from_peer, &t_delta);
+            double dt = (double)t_delta.tv_sec + ((double)t_delta.tv_usec/1.e6);
+            printf("%s latency: %fs\n", 
+                    (((packet_t*)buf)->pkt_type == PUBLIC_DATA ? "Public" : "Private"),
+                    dt);
+
+            printf("Sending timestamp to partner's %s IP\n",
+                    (first_response_port==PUBLIC?"public":"private"));
+            sock_partner.sin_family = AF_INET;
+            sock_partner.sin_port = first_response_port==PUBLIC?partner.ip_data.public_port:partner.ip_data.private_port;
+            sock_partner.sin_addr.s_addr =first_response_port==PUBLIC? partner.ip_data.public_addr:partner.ip_data.private_addr;
+            memset(buf, 0, sizeof(buf));
+            gettimeofday(&t_now, NULL);
+            ((packet_t*)buf)->pkt_type = first_response_port==PUBLIC?PUBLIC_DATA:PRIVATE_DATA;
+            memcpy((void*)&((packet_t*)buf)->client_data, &t_now, sizeof(struct timeval));
+            bytesSent = sendto(sock_fd, buf, sizeof(struct timeval), 0, 
+                    (struct sockaddr *)&sock_partner, sizeof(sock_partner));
+            if(bytesSent < 0) {
+                printf("Error: could not send timestamp to partner\n");
+                return -1;
+            }
+        }
+        break;
     }
 
 	close(sock_fd);
