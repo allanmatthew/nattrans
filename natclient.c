@@ -49,6 +49,7 @@ typedef int clockid_t;
 int sock_fd;
 client_t me;
 client_t partner;
+char if_name[64];
 
 /* Get current wall-clock time and return it in microseconds since the Unix
  * epoch.
@@ -93,15 +94,18 @@ int open_port(int port) {
 		printf("udp: can't create socket\n");
 		return -1;
 	}
-
 #if 0
+#if (defined __MACH__ && defined __APPLE__)
+    setsockopt(sock_fd, SOL_SOCKET, IP_RECVIF, if_name, strlen(if_name));
+#else
 	struct ifreq ifr;
 	memset(&ifr, 0, sizeof(ifr));
-        snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "wwan0");
-        if (setsockopt(sock_fd, SOL_SOCKET, SO_BINDTODEVICE, (void *)&ifr, sizeof(ifr)) < 0) {
-                printf("Unable to bind to interface\n");
-                return 0;
-        }
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", if_name);
+    if (setsockopt(sock_fd, SOL_SOCKET, SO_BINDTODEVICE, (void *)&ifr, sizeof(ifr)) < 0) {
+        printf("Unable to bind to interface\n");
+        return 0;
+    }
+#endif
 #endif
 
     setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
@@ -172,7 +176,6 @@ int main(int argc, char *argv[]) {
     struct in_addr ia;
 
     char server_addr[64];
-    char if_name[64];
     int server_port;
 
     if(argc < 6) {
@@ -361,6 +364,10 @@ int main(int argc, char *argv[]) {
      * responses, and depending on which port (public/private) we see
      * the first response send from then on on that port */
     printf("Sending pings to partner's private and public IPs\n");
+    double min = 99999;
+    double max = 0;
+    double avg = 0;
+    int n_avg = 0;
     while(true) {
         /* Wait for data back from the other client */
         memset(buf, 0, sizeof(buf));
@@ -395,9 +402,21 @@ int main(int argc, char *argv[]) {
             memcpy(&t_from_peer, buf_ptr, sizeof(uint64_t));
             t_now = clock_gettime_us(CLOCK_MONOTONIC);
             delta = (double)(t_now - t_from_peer)/1.e3;
-            printf("Ping response on %s port: %fms\n",
+
+            if(n_avg == 0){
+                avg = delta;
+                n_avg = 1;
+            }
+            else
+                avg = avg + (delta - avg)/(++n_avg);
+
+            if(delta > max)
+                max = delta;
+            if(delta < min)
+                min = delta;
+            printf("Ping response on %s port: %fms (min: %f avg: %f max: %f)\n",
                     (((packet_t*)buf)->pkt_type == PUBLIC_DATA ? "public" : "private"),
-                    delta);
+                    delta, min, avg, max);
         }
         else {
             //Send it right back
