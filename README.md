@@ -1,3 +1,5 @@
+This project is based on this work: http://www.bford.info/pub/net/p2pnat/index.html
+
 This will build on Linux or OSX.  Make sure you have gcc installed.
 
 to build, run
