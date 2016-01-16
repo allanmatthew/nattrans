@@ -16,7 +16,7 @@ separate LTE modems connected to each.
 
 To execute, run the command
 
-./natclient -d wwan0 -s 54.173.71.197 -p 9234
+    ./natclient -d wwan0 -s 54.173.71.197 -p 9234
 
 Where wwan0 is the LTE device name, 54.173.71.197:9234 are the IP/port for
 the rendezvous server.  These are the defaults for the AWS server.
