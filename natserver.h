@@ -30,4 +30,6 @@ typedef struct __attribute__((__packed__)){
 	client_t client_data;
 }packet_t;
 
+int punch_udp(int localport, char if_name[], struct sockaddr_in *peerAddr);
+
 #endif //NATSERVER_H
